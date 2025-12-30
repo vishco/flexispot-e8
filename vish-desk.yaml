@@ -1,0 +1,169 @@
+# Steps to compile and upload:
+# 1. Connect Wemos D1 Mini to USB
+# 2. Run: esphome run vish-desk.yaml
+#    (This will compile and ask you to select the serial port /dev/cu.usbserial-...)
+# 3. If upload fails or you want to skip the menu:
+#    esphome upload vish-desk.yaml --device /dev/cu.usbserial-XXXXX
+#
+# OTA (Wireless) Update:
+# 1. Ensure the device is powered and online.
+# 2. Run: esphome run vish-desk.yaml
+#    (It will automatically find the device 'vish-desk.local' and upload wirelessly)
+#
+# Note: After flashing via USB, you must disconnect USB and power via the desk (RJ45)
+#       to see it online, as UART pins are used for desk communication.
+
+esphome:
+  name: vish-desk
+  friendly_name: vish-desk
+
+esp8266:
+  board: d1_mini
+
+# CRITICAL: Disable UART logging because we are using the hardware UART 
+# (GPIO1/3) to talk to the desk.
+logger:
+  baud_rate: 0
+  level: DEBUG
+
+api:
+  encryption:
+    key: "2HuRLpp7KEMRapLiVu8wOpxa4dGR/gbqrrFK4rL82cw="
+
+ota:
+  - platform: esphome
+    password: "3aae0cc9d7228af9d8326b9b0f7a6430"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Vish-Desk Fallback Hotspot"
+    password: "RnSJoFZ9pO4X"
+
+captive_portal:
+
+# Import the specific component for Loctek/FlexiSpot desks from iMicknl's repo
+external_components:
+  - source: github://iMicknl/LoctekMotion_IoT
+    components: [ loctekmotion_desk_height ]
+
+uart:
+  id: desk_uart
+  tx_pin: GPIO3
+  rx_pin: GPIO1
+  baud_rate: 9600
+
+# Desk Height Sensor
+sensor:
+  - platform: loctekmotion_desk_height
+    id: desk_height
+    name: "Desk Height"
+    uart_id: desk_uart
+    # Adjust min/max if needed. E8 usually 60-125cm approx.
+    # Logic from iMicknl's repo to auto-update cover position
+    on_value:
+      then:
+        - cover.template.publish:
+            id: desk_cover
+            position: !lambda |-
+                float min_h = 60.0;
+                float max_h = 125.0;
+                if (x < min_h) return 0.0;
+                if (x > max_h) return 1.0;
+                return (x - min_h) / (max_h - min_h);
+
+# Helper Switches for UART Commands
+switch:
+  - platform: gpio
+    name: "Desk Screen / Wake"
+    pin: GPIO5
+    id: pin20_wake
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: uart
+    name: "Desk Up"
+    id: switch_up
+    icon: mdi:arrow-up-bold
+    data: [0x9b, 0x06, 0x02, 0x01, 0x00, 0xfc, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+    on_turn_on:
+      - switch.turn_off: pin20_wake # Toggle wake pin
+      - delay: 200ms
+      - switch.turn_on: pin20_wake
+
+  - platform: uart
+    name: "Desk Down"
+    id: switch_down
+    icon: mdi:arrow-down-bold
+    data: [0x9b, 0x06, 0x02, 0x02, 0x00, 0x0c, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+    on_turn_on:
+      - switch.turn_off: pin20_wake
+      - delay: 200ms
+      - switch.turn_on: pin20_wake
+
+# Main Cover Entity
+cover:
+  - platform: template
+    name: "Desk"
+    id: desk_cover
+    device_class: blind
+    has_position: true
+    # Simple logic: keep moving until target reached (simplified from original)
+    open_action:
+      - switch.turn_off: switch_down
+      - switch.turn_on: switch_up
+    close_action:
+      - switch.turn_off: switch_up
+      - switch.turn_on: switch_down
+    stop_action:
+      - switch.turn_off: switch_up
+      - switch.turn_off: switch_down
+
+# Preset Buttons (Standard FlexiSpot commands)
+button:
+  - platform: template
+    name: "Preset 1"
+    icon: mdi:numeric-1-box
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d]
+
+  - platform: template
+    name: "Preset 2"
+    icon: mdi:numeric-2-box
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d]
+
+  - platform: template
+    name: "Sit (Preset 3)"
+    icon: mdi:chair-rolling
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d]
+
+  - platform: template
+    name: "Stand (Preset 4)"
+    icon: mdi:human-handsup
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
+
+  - platform: template
+    name: "Wake Desk"
+    on_press:
+      - switch.turn_off: pin20_wake
+      - delay: 500ms
+      - switch.turn_on: pin20_wake
