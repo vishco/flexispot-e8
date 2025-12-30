@@ -17,6 +17,16 @@ esphome:
   name: vish-desk
   friendly_name: vish-desk
 
+  # Wake the desk on boot using the 'M' command to force height report
+  on_boot:
+    priority: -10
+    then:
+      - delay: 5s
+      # Send 'M' (Memory) Command - usually forces display update
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+
 esp8266:
   board: d1_mini
 
@@ -76,13 +86,6 @@ sensor:
 
 # Helper Switches for UART Commands
 switch:
-  - platform: gpio
-    name: "Desk Screen / Wake"
-    pin: GPIO5
-    id: pin20_wake
-    restore_mode: ALWAYS_ON
-    internal: true
-
   - platform: uart
     name: "Desk Up"
     id: switch_up
@@ -91,10 +94,6 @@ switch:
     uart_id: desk_uart
     send_every: 108ms
     internal: true
-    on_turn_on:
-      - switch.turn_off: pin20_wake # Toggle wake pin
-      - delay: 200ms
-      - switch.turn_on: pin20_wake
 
   - platform: uart
     name: "Desk Down"
@@ -104,10 +103,6 @@ switch:
     uart_id: desk_uart
     send_every: 108ms
     internal: true
-    on_turn_on:
-      - switch.turn_off: pin20_wake
-      - delay: 200ms
-      - switch.turn_on: pin20_wake
 
 # Main Cover Entity
 cover:
@@ -160,10 +155,3 @@ button:
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
-
-  - platform: template
-    name: "Wake Desk"
-    on_press:
-      - switch.turn_off: pin20_wake
-      - delay: 500ms
-      - switch.turn_on: pin20_wake
