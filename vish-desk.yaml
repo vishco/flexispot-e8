@@ -12,17 +12,32 @@
 #
 # Note: After flashing via USB, you must disconnect USB and power via the desk (RJ45)
 #       to see it online, as UART pins are used for desk communication.
+#
+# Height sensor not updating? Ensure RJ45 Pin 4 (Wake/Screen, PIN 20) is connected to GPIO5 (D1).
+#    Without it the desk does not broadcast height. See README wiring.
+# Desk not responding? (e.g. after HA/ESPHome update):
+#   1. In HA, call "Wake desk" button (diagnostic), wait ~5s, then try cover or presets.
+#   2. Re-flash this config via OTA to rule out a bad firmware state.
+#   3. external_components is set to refresh: 365d to avoid surprise LoctekMotion changes.
 
 esphome:
   name: vish-desk
   friendly_name: vish-desk
 
-  # Wake the desk on boot using the 'M' command to force height report
+  # Wake the desk on boot: screen pin is already HIGH via switch_screen (ALWAYS_ON).
+  # Send Wake Up then M so the control box starts broadcasting height.
   on_boot:
     priority: -10
     then:
       - delay: 5s
-      # Send 'M' (Memory) Command - usually forces display update
+      - switch.turn_on: switch_screen
+      - delay: 500ms
+      # Wake Up command – control box only broadcasts height after this
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 300ms
+      # M (Memory) command – forces height report
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
@@ -35,6 +50,9 @@ esp8266:
 logger:
   baud_rate: 0
   level: DEBUG
+  # Suppress status LED state changes to reduce log noise
+  logs:
+    light: none
 
 api:
   encryption:
@@ -54,16 +72,62 @@ wifi:
 
 captive_portal:
 
-# Import the specific component for Loctek/FlexiSpot desks from iMicknl's repo
+# Import the specific component for Loctek/FlexiSpot desks from iMicknl's repo.
+# Refresh set to 365d to avoid surprise breaking changes from ESPHome/HA updates.
+# If the desk stops working after an update, try: 1) Wake desk button, 2) Re-flash, 3) Pin to a commit ref.
 external_components:
   - source: github://iMicknl/LoctekMotion_IoT
     components: [ loctekmotion_desk_height ]
+    refresh: 365d
 
 uart:
   id: desk_uart
   tx_pin: GPIO3
   rx_pin: GPIO1
   baud_rate: 9600
+
+# Screen wake pin (RJ45 Pin 4 / PIN 20). Must be HIGH for desk to broadcast height and accept commands.
+# Connect RJ45 Pin 4 to GPIO5 (D1) on D1 Mini. Without this, height sensor stays empty.
+output:
+  - platform: gpio
+    pin: GPIO5
+    id: screen_pin
+  - platform: gpio
+    pin: GPIO2
+    id: led_gpio
+    inverted: true
+
+light:
+  - platform: binary
+    name: "VishDesk Status LED"
+    id: onboard_led
+    output: led_gpio
+    internal: true
+
+# Connection status: on when WiFi + API connected, off when error (e.g. no WiFi)
+binary_sensor:
+  - platform: status
+    name: "VishDesk Status"
+    id: connection_status
+
+# Blink when connected, solid ON when error (e.g. not connected to WiFi)
+interval:
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: connection_status
+          then:
+            - light.toggle: onboard_led
+          else:
+            - light.turn_on: onboard_led
+
+  # Desk only broadcasts height for a short time after wake; re-send M every 30s to keep updates
+  - interval: 30s
+    then:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
 
 # Desk Height Sensor
 sensor:
@@ -85,7 +149,16 @@ sensor:
                 return (x - min_h) / (max_h - min_h);
 
 # Helper Switches for UART Commands
+# Virtual screen (PIN 20): keep HIGH so desk broadcasts height; connect RJ45 Pin 4 to GPIO5.
 switch:
+  - platform: output
+    name: "Virtual screen (PIN 20)"
+    id: switch_screen
+    output: screen_pin
+    restore_mode: ALWAYS_ON
+    entity_category: config
+    internal: true
+
   - platform: uart
     name: "Desk Up"
     id: switch_up
@@ -94,6 +167,11 @@ switch:
     uart_id: desk_uart
     send_every: 108ms
     internal: true
+    on_turn_on:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
 
   - platform: uart
     name: "Desk Down"
@@ -103,6 +181,11 @@ switch:
     uart_id: desk_uart
     send_every: 108ms
     internal: true
+    on_turn_on:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
 
 # Main Cover Entity
 cover:
@@ -111,6 +194,7 @@ cover:
     id: desk_cover
     device_class: blind
     has_position: true
+    optimistic: true
     # Simple logic: keep moving until target reached (simplified from original)
     open_action:
       - switch.turn_off: switch_down
@@ -123,11 +207,31 @@ cover:
       - switch.turn_off: switch_down
 
 # Preset Buttons (Standard FlexiSpot commands)
+# Debug: "Wake desk" sends the same command as on_boot – use if desk stops responding (e.g. after HA/ESPHome update).
 button:
+  - platform: template
+    name: "Wake desk"
+    icon: mdi:power-sleep
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: switch_screen
+      - delay: 500ms
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 300ms
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+
   - platform: template
     name: "Preset 1"
     icon: mdi:numeric-1-box
     on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d]
@@ -138,6 +242,10 @@ button:
     on_press:
       - uart.write:
           id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
+      - uart.write:
+          id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d]
 
   - platform: template
@@ -146,12 +254,20 @@ button:
     on_press:
       - uart.write:
           id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
+      - uart.write:
+          id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d]
 
   - platform: template
     name: "Stand (Preset 4)"
     icon: mdi:human-handsup
     on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+      - delay: 200ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
