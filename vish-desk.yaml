@@ -26,9 +26,11 @@ esphome:
 
   # Wake the desk on boot: screen pin is already HIGH via switch_screen (ALWAYS_ON).
   # Send Wake Up then M so the control box starts broadcasting height.
+  # Turn on LED first so we know we reached on_boot (diagnostic for power-cut recovery).
   on_boot:
     priority: -10
     then:
+      - light.turn_on: onboard_led
       - delay: 5s
       - switch.turn_on: switch_screen
       - delay: 500ms
@@ -57,6 +59,8 @@ logger:
 api:
   encryption:
     key: "2HuRLpp7KEMRapLiVu8wOpxa4dGR/gbqrrFK4rL82cw="
+  # Reboot if no client (e.g. HA) connects; helps recover from stuck state after power cut
+  reboot_timeout: 10min
 
 ota:
   - platform: esphome
@@ -65,10 +69,15 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: none
 
   ap:
     ssid: "Vish-Desk Fallback Hotspot"
     password: "RnSJoFZ9pO4X"
+    ap_timeout: 5min
+  on_disconnect:
+    - delay: 3min
+    - button.press: restart_btn
 
 captive_portal:
 
@@ -122,8 +131,8 @@ interval:
           else:
             - light.turn_on: onboard_led
 
-  # Desk only broadcasts height for a short time after wake; re-send M every 30s to keep updates
-  - interval: 30s
+  # Desk only broadcasts height for a short time after wake; re-send M every 1h to keep updates
+  - interval: 1h
     then:
       - uart.write:
           id: desk_uart
@@ -151,6 +160,10 @@ sensor:
 # Helper Switches for UART Commands
 # Virtual screen (PIN 20): keep HIGH so desk broadcasts height; connect RJ45 Pin 4 to GPIO5.
 switch:
+  - platform: restart
+    name: "VishDesk Restart"
+    entity_category: diagnostic
+
   - platform: output
     name: "Virtual screen (PIN 20)"
     id: switch_screen
@@ -209,6 +222,11 @@ cover:
 # Preset Buttons (Standard FlexiSpot commands)
 # Debug: "Wake desk" sends the same command as on_boot – use if desk stops responding (e.g. after HA/ESPHome update).
 button:
+  - platform: restart
+    name: "Restart device"
+    id: restart_btn
+    entity_category: diagnostic
+
   - platform: template
     name: "Wake desk"
     icon: mdi:power-sleep
